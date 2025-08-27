@@ -20,8 +20,44 @@ ANALYSIS_PARAMS = {
     'topic_merge_delta': 0.1,   # Parametr łączenia tematów
     'topic_merge_threshold': 0.1,  # Próg łączenia tematów
     'max_words_per_topic': 20,  # Maksymalna liczba słów kluczowych na temat
-    'random_seed': 42           # Ziarno losowości dla powtarzalności wyników
+    'random_seed': int(os.getenv('TOPIC_RANDOM_SEED', '42'))           # Ziarno losowości dla powtarzalności wyników
 }
+
+# Mapowanie skrótów nazw forów do czytelnych kodów
+FORUM_CODES = {
+    'radio_katolik': 'RKAT',
+    'dolina_modlitwy': 'DMOD',
+    'wiara': 'WIAR',
+    'z_chrystusem': 'ZCHR',
+}
+
+# Parametry modelowania tematów (Top2Vec)
+_num_topics_env = os.getenv('TOPIC_NUM_TOPICS')
+try:
+    _target_num_topics = int(_num_topics_env) if _num_topics_env not in (None, '', 'none', 'null') else None
+    if _target_num_topics is not None and _target_num_topics < 2:
+        _target_num_topics = 2
+except Exception:
+    _target_num_topics = None
+
+TOPICS_PARAMS = {
+    # Czy przechowywać treści dokumentów w zapisanym modelu Top2Vec
+    'keep_documents_in_model': os.getenv('TOPIC_KEEP_DOCUMENTS', 'true').lower() in ('1', 'true', 'yes'),
+    # Jaki model osadzania użyć (np. "doc2vec", "universal-sentence-encoder", itp.)
+    'embedding_model': os.getenv('TOPIC_EMBEDDING_MODEL', 'doc2vec'),
+    # Docelowa liczba tematów po redukcji hierarchicznej (None = bez wymuszania)
+    'target_num_topics': _target_num_topics,
+}
+
+# Wykluczane sekcje (po tytule w `forum_sections.title`) – dopasowanie bez rozróżniania wielkości liter
+_excluded_env = os.getenv('TOPIC_EXCLUDED_SECTIONS')
+_default_excluded = [
+    'REGULAMIN', 'Kosz', 'KOSZ', 'Regulamin forum', 'Informacje forumowe', 'Uwagi o serwisie', 'Aarchiwum'
+]
+if _excluded_env is not None:
+    EXCLUDED_SECTIONS = [s.strip() for s in _excluded_env.split(',') if s.strip()]
+else:
+    EXCLUDED_SECTIONS = _default_excluded
 
 # Fora do analizy
 _forums_env = os.getenv("TOPIC_FORUMS")
