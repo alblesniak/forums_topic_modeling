@@ -133,6 +133,23 @@ def _fetch_post_rows(conn: sqlite3.Connection, post_ids: List[str]) -> pd.DataFr
     return df
 
 
+_INVALID_XLS_RE = re.compile(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]")
+
+
+def _sanitize_excel_text(value: Optional[object]) -> Optional[str]:
+    """Usuwa nielegalne znaki XML/Excel z tekstu.
+
+    openpyxl odrzuca kontrolne znaki 0x00-0x1F (z wyj. \t, \n, \r).
+    """
+    if value is None:
+        return None
+    try:
+        text = str(value)
+    except Exception:
+        return None
+    return _INVALID_XLS_RE.sub("", text)
+
+
 def export_examples(params: ExportParams) -> Path:
     model = _load_model(params.model_path)
 
@@ -175,8 +192,14 @@ def export_examples(params: ExportParams) -> Path:
     out_path = examples_dir / filename
 
     # Zapis do Excela
+    # Sanitizacja pól tekstowych przed zapisem do Excela
+    df_to_write = df_final.copy()
+    for col in ["content", "username", "forum", "url"]:
+        if col in df_to_write.columns:
+            df_to_write[col] = df_to_write[col].map(_sanitize_excel_text)
+
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        df_final.to_excel(writer, index=False, sheet_name="examples")
+        df_to_write.to_excel(writer, index=False, sheet_name="examples")
 
     return out_path
 

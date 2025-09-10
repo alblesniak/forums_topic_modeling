@@ -7,7 +7,7 @@ Funkcjonalności:
 - Wczytanie Excela (kolumny: content, opcjonalnie post_id)
 - Podział na batch'e po 10 postów i tworzenie jobów Batch API (chat.completions)
 - Polling statusu, pobranie outputu, zapis wyników JSON dla batchy
-- Dynamiczne rozszerzanie taksonomii o nowe podkategorie (X.n lub X.Y.n)
+- Dynamiczne rozszerzanie taksonomii o nowe podkategorie (WYŁĄCZNIE X.n)
 - Fuzja wszystkich wyników i merge z wejściowym Excelem (dodanie kolumn)
 
 Wymagania:
@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
+import logging
 
 try:
     from openai import OpenAI  # type: ignore
@@ -79,6 +80,25 @@ def _safe_str(x: Any) -> str:
     return (str(x) if x is not None else '').strip()
 
 
+def _setup_logger(run_dir: Optional[Path] = None) -> logging.Logger:
+    logger = logging.getLogger("llm_batch")
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        logger.addHandler(sh)
+        if run_dir is not None:
+            try:
+                _ensure_dir(run_dir)
+                fh = logging.FileHandler(run_dir / 'llm_batch.log', encoding='utf-8')
+                fh.setFormatter(fmt)
+                logger.addHandler(fh)
+            except Exception:
+                pass
+    return logger
+
+
 def _load_excel_posts(xlsx_path: Path) -> pd.DataFrame:
     df = pd.read_excel(xlsx_path)
     # Ustal post_id
@@ -101,7 +121,7 @@ def _load_excel_posts(xlsx_path: Path) -> pd.DataFrame:
     return df[['post_id', 'content']].copy()
 
 
-# ==== Taksonomia (2 poziomy: główny i podkategorie; dopuszczamy zagnieżdżenie 3-poziomowe jako sub_id X.Y.Z) ====
+# ==== Taksonomia (DWUPOZIOMOWA: główna X i podkategorie X.Y; bez X.Y.Z) ====
 
 def _base_taxonomy() -> Dict[str, Any]:
     """Zwraca drzewo taksonomii w postaci:
@@ -159,71 +179,27 @@ def _base_taxonomy() -> Dict[str, Any]:
             'children': {
                 '3.1': {
                     'name': 'Gospodarka i podatki',
-                    'children': {
-                        '3.1.1': {'name': 'Podatek liniowy vs progresja'},
-                        '3.1.2': {'name': '500+ i polityka socjalna'},
-                        '3.1.3': {'name': 'Interwencjonizm vs leseferyzm'},
-                        '3.1.4': {'name': 'Dług/deficyt socjalizm vs liberalizm'},
-                        '3.1.5': {'name': 'Prywatyzacje / własność państwowa'},
-                    },
                 },
                 '3.2': {
                     'name': 'Światopogląd i bioetyka',
-                    'children': {
-                        '3.2.1': {'name': 'Aborcja – regulacje'},
-                        '3.2.2': {'name': 'In vitro'},
-                        '3.2.3': {'name': 'Związki partnerskie / małżeństwa jednopłciowe / adopcje'},
-                        '3.2.4': {'name': 'Edukacja seksualna / „ideologia LGBT”'},
-                    },
                 },
                 '3.3': {
                     'name': 'Kościół i religia w polityce',
-                    'children': {
-                        '3.3.1': {'name': 'Rola Kościoła / mediów katolickich'},
-                        '3.3.2': {'name': 'Krzyż / symbole religijne'},
-                        '3.3.3': {'name': '„Partia dla katolików” / głos katolika'},
-                    },
                 },
                 '3.4': {
                     'name': 'Państwo prawa i instytucje',
-                    'children': {
-                        '3.4.1': {'name': 'TK / sądy / prokuratura'},
-                        '3.4.2': {'name': 'Służby i lustracja/dekomunizacja'},
-                        '3.4.3': {'name': 'Media publiczne – stronniczość'},
-                        '3.4.4': {'name': 'Spółki SP / nominacje polityczne'},
-                    },
                 },
                 '3.5': {
                     'name': 'Polityka zagraniczna i bezpieczeństwo',
-                    'children': {
-                        '3.5.1': {'name': 'UE / KPO / Zielony Ład'},
-                        '3.5.2': {'name': 'NATO/USA – obecność wojsk'},
-                        '3.5.3': {'name': 'Rosja/Ukraina – relacje'},
-                    },
                 },
                 '3.6': {
                     'name': 'Polityka energetyczno‑klimatyczna',
-                    'children': {
-                        '3.6.1': {'name': 'Węgiel i kopalnie'},
-                        '3.6.2': {'name': 'Zielony Ład / transformacja'},
-                        '3.6.3': {'name': 'Import odpadów / „ekologiczna prawica”'},
-                    },
                 },
                 '3.7': {
                     'name': 'Polityka społeczna i demografia',
-                    'children': {
-                        '3.7.1': {'name': 'Rodzina, demografia, świadczenia'},
-                        '3.7.2': {'name': 'Migracja / integracja cudzoziemców'},
-                        '3.7.3': {'name': 'Zdrowie publiczne (pandemia)'},
-                    },
                 },
                 '3.8': {
                     'name': 'Media i informacja',
-                    'children': {
-                        '3.8.1': {'name': '„Propaganda”, „fałszywe newsy”'},
-                        '3.8.2': {'name': 'Prywatne vs publiczne media'},
-                        '3.8.3': {'name': 'Cenzura / „cisza wyborcza”'},
-                    },
                 },
             },
         },
@@ -315,40 +291,6 @@ def _base_taxonomy() -> Dict[str, Any]:
                 '11.5': {'name': 'Ton cyniczny / zniechęcony'},
             },
         },
-        '12': {
-            'name': 'Metryki oparte na treści (analityka)',
-            'children': {
-                '12.1': {'name': 'Stosunek do sondaży'},
-                '12.2': {'name': 'Kandydat optymalny (taktycznie/ideowo)'},
-                '12.3': {'name': 'Indeks polaryzacji'},
-                '12.4': {'name': 'Indeks moralizacji'},
-                '12.5': {'name': 'Indeks spiskowy'},
-                '12.6': {'name': 'Indeks programowy'},
-                '12.7': {'name': 'Indeks historyzacji'},
-                '12.8': {'name': 'Indeks medialny'},
-            },
-        },
-        '13': {
-            'name': 'Specjalne etykiety tematyczne (przekrojowe)',
-            'children': {
-                '13.1': {'name': 'Antypopulizm / antyelitaryzm'},
-                '13.2': {'name': 'Antyklerykalizm / klerykalizm'},
-                '13.3': {'name': '„Socjalizm” vs „liberalizm” – etykiety'},
-                '13.4': {'name': '„Agentura rosyjska/niemiecka” – oskarżenia'},
-                '13.5': {'name': '„Mniejsze zło” – uzasadnienia'},
-                '13.6': {'name': '„Sondaż jako performowanie rzeczywistości”'},
-                '13.7': {'name': '„Media jako aktor polityczny”'},
-            },
-        },
-        '14': {
-            'name': 'Kanał i kontekst wypowiedzi',
-            'children': {
-                '14.1': {'name': 'Forum katolickie'},
-                '14.2': {'name': 'Forum świeckie/ogólnopolityczne'},
-                '14.3': {'name': 'Odwołania do konkretnych wątków/portali'},
-                '14.4': {'name': 'Cytaty z debat/wywiadów/eksposé'},
-            },
-        },
     }
     return t
 
@@ -359,21 +301,17 @@ def _taxonomy_to_text(tax: Dict[str, Any]) -> str:
         main = tax[main_id]
         lines.append(f"{main_id}. {main.get('name','')}")
         children = main.get('children', {}) or {}
-        # wypisz rekursywnie do 3 poziomu
+        # wypisz TYLKO 2 poziomy: X oraz X.Y (bez X.Y.Z)
         for sub_id in sorted(children.keys(), key=lambda x: [int(p) for p in x.split('.')]):
             sub = children[sub_id]
             lines.append(f"- {sub_id}. {sub.get('name','')}")
-            sub_children = sub.get('children', {}) or {}
-            for subsub_id in sorted(sub_children.keys(), key=lambda x: [int(p) for p in x.split('.')]):
-                subsub = sub_children[subsub_id]
-                lines.append(f"  - {subsub_id}. {subsub.get('name','')}")
     return "\n".join(lines)
 
 
 def _add_new_subcategories(tax: Dict[str, Any], proposals: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Dodaje nowe podkategorie do taksonomii. proposals: [{'parent_id':'1','name':'...'}].
-    Zwraca listę faktycznie dodanych z ich nadanym id: [{'id':'1.23','name':'...','parent_id':'1'}].
-    Obsługuje także rodziców 2‑poziomowych typu '3.1'.
+    """Dodaje nowe podkategorie do DWUPOZIOMOWEJ taksonomii.
+    Akceptuje tylko parent_id na poziomie głównym (X). Propozycje z parent_id typu 'X.Y' są ignorowane.
+    Zwraca listę dodanych wpisów: [{'id':'X.n','name':'...','parent_id':'X'}].
     """
     added: List[Dict[str, str]] = []
     for p in proposals or []:
@@ -407,38 +345,17 @@ def _add_new_subcategories(tax: Dict[str, Any], proposals: List[Dict[str, str]])
             ch[new_id] = {'name': name}
             added.append({'id': new_id, 'name': name, 'parent_id': parent_id})
         elif len(parts) == 2:
-            # rodzic drugiego poziomu (np. '3.1')
-            main = tax.get(parts[0])
-            if not isinstance(main, dict):
-                continue
-            sub = (main.get('children') or {}).get(parent_id)
-            if not isinstance(sub, dict):
-                continue
-            ch2 = sub.setdefault('children', {})
-            existing = [cid for cid in ch2.keys() if cid.startswith(parent_id + '.')]
-            next_idx = 1
-            if existing:
-                try:
-                    next_idx = max(int(e.split('.')[2]) for e in existing) + 1
-                except Exception:
-                    next_idx = len(existing) + 1
-            new_id = f"{parent_id}.{next_idx}"
-            if new_id in ch2:
-                k = next_idx
-                while f"{parent_id}.{k}" in ch2:
-                    k += 1
-                new_id = f"{parent_id}.{k}"
-            ch2[new_id] = {'name': name}
-            added.append({'id': new_id, 'name': name, 'parent_id': parent_id})
-        # ignoruj głębsze poziomy (max 3)
+            # zablokuj dodawanie 3. poziomu
+            continue
+        # ignoruj głębsze poziomy
     return added
 
 
 def _render_system_prompt(tax: Dict[str, Any]) -> str:
     return (
-        "Zadanie: Przypisz post do 1–3 kategorii (główna + podkategoria) z katalogu. "
-        "Używaj istniejących podkategorii. TYLKO gdy żadna nie pasuje, zaproponuj NOWĄ podkategorię.\n"
-        "W razie nowej podkategorii wskaż rodzica przez parent_id (np. '1' lub '3.1') i krótką nazwę.\n"
+        "Zadanie: Przypisz post do 1–3 etykiet z KATALOGU DWUPOZIOMOWEGO (główna + podkategoria). "
+        "Dozwolone ID: X (główna) oraz X.Y (podkategoria). Poziom X.Y.Z jest NIEDOZWOLONY.\n"
+        "Używaj istniejących podkategorii. TYLKO gdy żadna nie pasuje, zaproponuj NOWĄ podkategorię pod kategorią główną (parent_id = 'X').\n"
         "Zwróć WYŁĄCZNIE JSON:")
 
 
@@ -448,14 +365,14 @@ def _render_user_prompt(post_id: str, content: str, tax: Dict[str, Any]) -> str:
         "choices": [
             {
                 "main_id": "X",
-                "sub_id": "X.Y lub X.Y.Z",
+                "sub_id": "X.Y",
                 "main_label": "...",
                 "sub_label": "..."
             }
         ],
         "summary": "1 zdanie (do 3 krótkich), bez wstępu typu 'Autor uważa...'.",
         "new_subcategories": [
-            {"parent_id": "X lub X.Y", "name": "tylko jeśli naprawdę brak pasującej"}
+            {"parent_id": "X", "name": "tylko jeśli naprawdę brak pasującej"}
         ]
     }
     catalog = _taxonomy_to_text(tax)
@@ -535,13 +452,17 @@ def _build_batch_jsonl_lines(rows: List[Dict[str, str]], tax: Dict[str, Any], pa
         user_msg = _render_user_prompt(pid, content, tax)
         body = {
             "model": params.model,
-            "temperature": params.temperature,
-            "max_tokens": params.max_tokens,
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
         }
+        # Parametry specyficzne dla OpenRouter (OpenAI Batch API często nie wspiera temperature różnej od domyślnej)
+        try:
+            if _is_openrouter():
+                body["temperature"] = params.temperature
+        except Exception:
+            pass
         line = {
             "custom_id": f"post-{pid}",
             "method": "POST",
@@ -592,21 +513,25 @@ def _retrieve_file_text(client: Any, file_id: str) -> str:
         return ""
 
 
-def _poll_until_complete(client: Any, batch_id: str, interval_s: int, state_path: Path) -> Any:
+def _poll_until_complete(client: Any, batch_id: str, interval_s: int, state_path: Path, logger: Optional[logging.Logger] = None) -> Any:
+    last_status = None
     while True:
         batch = client.batches.retrieve(batch_id)
-        status = getattr(batch, 'status', None) or batch.get('status')
+        status = getattr(batch, 'status', None)
+        if logger and status != last_status:
+            logger.info(f"[BatchAPI] status={status}")
+            last_status = status
         # zapisuj stan
         try:
             _write_json(state_path, {
-                'batch_id': getattr(batch, 'id', None) or batch.get('id'),
+                'batch_id': getattr(batch, 'id', None),
                 'status': status,
-                'request_counts': getattr(batch, 'request_counts', None) or batch.get('request_counts'),
+                'request_counts': getattr(batch, 'request_counts', None),
                 'timestamps': {
-                    'created_at': getattr(batch, 'created_at', None) or batch.get('created_at'),
-                    'in_progress_at': getattr(batch, 'in_progress_at', None) or batch.get('in_progress_at'),
-                    'completed_at': getattr(batch, 'completed_at', None) or batch.get('completed_at'),
-                    'failed_at': getattr(batch, 'failed_at', None) or batch.get('failed_at'),
+                    'created_at': getattr(batch, 'created_at', None),
+                    'in_progress_at': getattr(batch, 'in_progress_at', None),
+                    'completed_at': getattr(batch, 'completed_at', None),
+                    'failed_at': getattr(batch, 'failed_at', None),
                 }
             })
         except Exception:
@@ -617,15 +542,20 @@ def _poll_until_complete(client: Any, batch_id: str, interval_s: int, state_path
 
 
 def _chat_direct(client: Any, params: BatchRunParams, system_msg: str, user_msg: str) -> Dict[str, Any]:
-    resp = client.chat.completions.create(
-        model=params.model,
-        temperature=params.temperature,
-        max_tokens=params.max_tokens,
-        messages=[
+    kwargs: Dict[str, Any] = {
+        "model": params.model,
+        # max_tokens: nie używamy dla zgodności z modelami wymagającymi max_completion_tokens
+        "messages": [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
         ],
-    )
+    }
+    try:
+        if _is_openrouter():
+            kwargs["temperature"] = params.temperature
+    except Exception:
+        pass
+    resp = client.chat.completions.create(**kwargs)
     body = {
         'id': getattr(resp, 'id', None),
         'model': getattr(resp, 'model', None),
@@ -646,6 +576,10 @@ def run_batch_classification(
     excel_path: str = "data/topics/results/20250821/M/ALL/185832/examples/topic_2_pi_pis_sld.xlsx",
     batch_size: int = 10,
     poll_interval_s: int = 10,
+    concurrency: int = 1,
+    resume_dir: Optional[str] = None,
+    local_from_inputs_only: bool = False,
+    local_all: bool = False,
 ) -> Dict[str, Any]:
     """Główna funkcja orkiestracji klasyfikacji.
     Uwaga: dla OpenRouter wykonywany jest tryb bez Batch API (bez uploadu/pollingu),
@@ -658,16 +592,49 @@ def run_batch_classification(
     df = _load_excel_posts(xlsx)
     records = df.to_dict(orient='records')
 
-    # Katalog wyjściowy sesji
-    date_str, time_str = _now_slug()
-    run_dir = Path("data/topics/results") / f"llm_batch_{date_str}_{time_str}_{_rand_suffix()}"
-    _ensure_dir(run_dir)
+    # Katalog wyjściowy sesji (obsługa wznowienia)
+    if resume_dir:
+        run_dir = Path(resume_dir)
+        if not run_dir.exists():
+            raise FileNotFoundError(f"Brak katalogu do wznowienia: {resume_dir}")
+        logger = _setup_logger(run_dir)
+        logger.info("Wznawiam llm-batch")
+        taxonomy_path = run_dir / "taxonomy.json"
+        if not taxonomy_path.exists():
+            raise FileNotFoundError(f"Brak taxonomy.json w {run_dir}")
+        taxonomy = json.loads(taxonomy_path.read_text(encoding='utf-8'))
+        logger.info(f"Załadowano istniejącą taksonomię: {taxonomy_path}")
+        # Odczytaj już przetworzone batch_*_results.json aby zbudować all_outputs i ustalić next start
+        all_outputs: List[Dict[str, Any]] = []
+        processed_indices: set[int] = set()
+        for f in sorted(run_dir.glob('batch_*_results.json')):
+            try:
+                idx_str = f.stem.split('_')[1]
+                processed_indices.add(int(idx_str))
+                arr = json.loads(f.read_text(encoding='utf-8'))
+                if isinstance(arr, list):
+                    for item in arr:
+                        if isinstance(item, dict):
+                            all_outputs.append(item)
+            except Exception:
+                continue
+    else:
+        date_str, time_str = _now_slug()
+        run_dir = Path("data/topics/results") / f"llm_batch_{date_str}_{time_str}_{_rand_suffix()}"
+        _ensure_dir(run_dir)
+        logger = _setup_logger(run_dir)
+        logger.info("Start llm-batch")
+        all_outputs = []
+    logger.info(f"Excel: {xlsx}")
+    logger.info(f"Rekordy: {len(records)} | batch_size={batch_size} | poll={poll_interval_s}s")
 
     # Stan: taksonomia
     taxonomy_path = run_dir / "taxonomy.json"
     taxonomy: Dict[str, Any]
-    taxonomy = _base_taxonomy()
-    _write_json(taxonomy_path, taxonomy)
+    if not resume_dir:
+        taxonomy = _base_taxonomy()
+        _write_json(taxonomy_path, taxonomy)
+        logger.info(f"Zapisano bazową taksonomię: {taxonomy_path}")
 
     # Klient OpenAI/OpenRouter
     client = _get_openai_client()
@@ -675,8 +642,475 @@ def run_batch_classification(
     all_outputs: List[Dict[str, Any]] = []
 
     use_batch_api = not _is_openrouter()
+    provider = 'openai_batch' if use_batch_api else 'openrouter_direct'
+    logger.info(f"Provider: {provider} | model={LLM_CONFIG.get('model')} | temp={LLM_CONFIG.get('temperature')} | max_tokens={LLM_CONFIG.get('max_tokens')}")
+
+    # Tryb współbieżny dla OpenAI Batch API
+    if local_all:
+        # Lokalnie przetwarzaj całe wejście (wszystkie chunki), realtime
+        logger.info("Tryb lokalny: przetwarzam całe wejście bez Batch API")
+        all_chunks: List[List[Dict[str, Any]]] = list(_chunk_iter(records, batch_size))
+        start_idx = 0
+        if resume_dir:
+            # Pomiń już przetworzone wyniki
+            done = set(int(f.stem.split('_')[1]) for f in run_dir.glob('batch_*_results.json'))
+            start_idx = min(len(all_chunks), max(done) + 1) if done else 0
+        params = BatchRunParams(excel_path=xlsx, output_dir=run_dir, batch_size=batch_size, poll_interval_s=poll_interval_s)
+        for idx in range(start_idx, len(all_chunks)):
+            chunk = all_chunks[idx]
+            # Przygotuj i zapisz input.jsonl, jeśli nie ma (dla spójności artefaktów)
+            in_path = run_dir / f"batch_{idx:04d}_input.jsonl"
+            if not in_path.exists():
+                lines = _build_batch_jsonl_lines(chunk, taxonomy, params)
+                in_path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+            logger.info(f"[Batch {idx}] Lokalnie przetwarzam {len(chunk)} postów")
+            # Wykonaj żądania jedno po drugim
+            batch_results: List[Dict[str, Any]] = []
+            for r in chunk:
+                pid = _safe_str(r.get('post_id'))
+                content = _safe_str(r.get('content'))
+                system_msg = _render_system_prompt(taxonomy)
+                user_msg = _render_user_prompt(pid, content, taxonomy)
+                try:
+                    resp_body = _chat_direct(client, params, system_msg, user_msg)
+                    content_txt = ''
+                    try:
+                        if resp_body.get('choices') and resp_body['choices'][0].get('message'):
+                            content_txt = _safe_str(resp_body['choices'][0]['message'].get('content'))
+                    except Exception:
+                        content_txt = ''
+                    parsed = _parse_json_safe(content_txt) if content_txt else None
+                except Exception as exc:
+                    resp_body = {'error': str(exc)}
+                    parsed = None
+                batch_results.append({'custom_id': f'post-{pid}', 'raw': resp_body, 'parsed': parsed})
+                time.sleep(0.05)
+            # Zapisz wyniki, zaktualizuj taksonomię i agreguj
+            out_path = run_dir / f"batch_{idx:04d}_results.json"
+            _write_json(out_path, batch_results)
+            logger.info(f"[Batch {idx}] Lokalnie zapisano wyniki: {out_path} (records={len(batch_results)})")
+            proposals: List[Dict[str, str]] = []
+            for item in batch_results:
+                p = item.get('parsed')
+                if isinstance(p, dict) and isinstance(p.get('new_subcategories'), list):
+                    for pr in p['new_subcategories']:
+                        pr_parent = _safe_str(pr.get('parent_id'))
+                        pr_name = _safe_str(pr.get('name'))
+                        if pr_parent and pr_name:
+                            proposals.append({'parent_id': pr_parent, 'name': pr_name})
+            added = _add_new_subcategories(taxonomy, proposals)
+            if added:
+                _write_json(run_dir / f"batch_{idx:04d}_new_subcategories.json", added)
+                _write_json(taxonomy_path, taxonomy)
+                logger.info(f"[Batch {idx}] Dodano podkategorie: {len(added)}; taksonomia zaktualizowana")
+            for item in batch_results:
+                p = item.get('parsed')
+                if isinstance(p, dict):
+                    all_outputs.append(p)
+
+        # Zakończ ścieżką wspólną
+        combined_path = run_dir / "combined_results.json"
+        _write_json(combined_path, all_outputs)
+        logger.info(f"Zapisano łączny wynik: {combined_path} (records={len(all_outputs)})")
+        # Merge i return – reuse końcowej sekcji poniżej
+        rows_for_merge: List[Dict[str, Any]] = []
+        for p in all_outputs:
+            if not isinstance(p, dict):
+                continue
+            pid = _safe_str(p.get('post_id'))
+            summary = _safe_str(p.get('summary'))
+            cats = []
+            for ch in p.get('choices') or []:
+                try:
+                    mid = _safe_str(ch.get('main_id'))
+                    sid = _safe_str(ch.get('sub_id'))
+                    ml = _safe_str(ch.get('main_label'))
+                    sl = _safe_str(ch.get('sub_label'))
+                    cats.append(f"{mid}|{sid}|{ml}|{sl}")
+                except Exception:
+                    continue
+            rows_for_merge.append({'post_id': pid, 'llm_summary': summary, 'llm_categories': "; ".join(cats)})
+        df_llm = pd.DataFrame(rows_for_merge)
+        df_in = pd.read_excel(xlsx)
+        if 'post_id' not in df_in.columns:
+            if 'id' in df_in.columns:
+                df_in['post_id'] = df_in['id']
+            else:
+                df_in['post_id'] = pd.RangeIndex(start=1, stop=len(df_in) + 1, step=1)
+        try:
+            df_in['post_id'] = df_in['post_id'].astype(str)
+        except Exception:
+            df_in['post_id'] = df_in['post_id'].map(lambda x: str(x))
+        df_out = df_in.merge(df_llm, on='post_id', how='left')
+        excel_out = run_dir / f"labeled_{xlsx.name}"
+        with pd.ExcelWriter(excel_out, engine='openpyxl') as writer:
+            df_out.to_excel(writer, index=False, sheet_name='labeled')
+        logger.info(f"Zapisano Excela z etykietami: {excel_out}")
+        result = {
+            'run_dir': str(run_dir.resolve()),
+            'taxonomy_path': str(taxonomy_path.resolve()),
+            'combined_path': str(combined_path.resolve()),
+            'excel_out_path': str(excel_out.resolve()),
+            'total_posts': len(records),
+            'batches': len(all_chunks),
+        }
+        (run_dir / 'state.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+        logger.info("llm-batch (lokalnie, całe wejście): ZAKOŃCZONE")
+        logger.info(json.dumps(result, ensure_ascii=False))
+        return result
+
+    if local_from_inputs_only:
+        # Przetwarzanie lokalne istniejących batch_*_input.jsonl bez użycia Batch API
+        inputs = sorted(run_dir.glob('batch_*_input.jsonl'))
+        processed: set[int] = set(int(f.stem.split('_')[1]) for f in run_dir.glob('batch_*_results.json'))
+        logger.info(f"Tryb lokalny: znaleziono inputów={len(inputs)}; pomijam już przetworzone={len(processed)}")
+        for inp in inputs:
+            try:
+                idx = int(inp.stem.split('_')[1])
+            except Exception:
+                continue
+            if idx in processed:
+                continue
+            try:
+                lines = [json.loads(l) for l in inp.read_text(encoding='utf-8').splitlines() if l.strip()]
+            except Exception as exc:
+                logger.warning(f"[Batch {idx}] Nie mogę wczytać input.jsonl: {exc}")
+                continue
+            batch_results: List[Dict[str, Any]] = []
+            params = BatchRunParams(excel_path=xlsx, output_dir=run_dir, batch_size=batch_size, poll_interval_s=poll_interval_s)
+            for req in lines:
+                body = req.get('body') or {}
+                messages = body.get('messages') or []
+                system_msg = next((m.get('content') for m in messages if m.get('role') == 'system'), '')
+                user_msg = next((m.get('content') for m in messages if m.get('role') == 'user'), '')
+                try:
+                    resp_body = _chat_direct(client, params, system_msg, user_msg)
+                    content_txt = ''
+                    try:
+                        if resp_body.get('choices') and resp_body['choices'][0].get('message'):
+                            content_txt = _safe_str(resp_body['choices'][0]['message'].get('content'))
+                    except Exception:
+                        content_txt = ''
+                    parsed = _parse_json_safe(content_txt) if content_txt else None
+                except Exception as exc:
+                    resp_body = {'error': str(exc)}
+                    parsed = None
+                batch_results.append({
+                    'custom_id': req.get('custom_id'),
+                    'raw': resp_body,
+                    'parsed': parsed,
+                })
+                time.sleep(0.05)
+            out_path = run_dir / f"batch_{idx:04d}_results.json"
+            _write_json(out_path, batch_results)
+            logger.info(f"[Batch {idx}] Lokalnie zapisano wyniki: {out_path} (records={len(batch_results)})")
+            proposals: List[Dict[str, str]] = []
+            for item in batch_results:
+                p = item.get('parsed')
+                if isinstance(p, dict) and isinstance(p.get('new_subcategories'), list):
+                    for pr in p['new_subcategories']:
+                        pr_parent = _safe_str(pr.get('parent_id'))
+                        pr_name = _safe_str(pr.get('name'))
+                        if pr_parent and pr_name:
+                            proposals.append({'parent_id': pr_parent, 'name': pr_name})
+            added = _add_new_subcategories(taxonomy, proposals)
+            if added:
+                _write_json(run_dir / f"batch_{idx:04d}_new_subcategories.json", added)
+                _write_json(taxonomy_path, taxonomy)
+                logger.info(f"[Batch {idx}] Dodano podkategorie: {len(added)}; taksonomia zaktualizowana")
+            for item in batch_results:
+                p = item.get('parsed')
+                if isinstance(p, dict):
+                    all_outputs.append(p)
+
+        # Po trybie lokalnym wyjdź ścieżką końcową
+        combined_path = run_dir / "combined_results.json"
+        _write_json(combined_path, all_outputs)
+        logger.info(f"Zapisano łączny wynik: {combined_path} (records={len(all_outputs)})")
+        # Merge do Excela i podsumowanie jak niżej (reuse istniejącego kodu)
+        # (Upuść pozostały kod i przejdź do sekcji merge/podsumowanie)
+        # FALLTHROUGH do merge na końcu funkcji przez return tutaj poniżej
+        rows_for_merge: List[Dict[str, Any]] = []
+        for p in all_outputs:
+            if not isinstance(p, dict):
+                continue
+            pid = _safe_str(p.get('post_id'))
+            summary = _safe_str(p.get('summary'))
+            cats = []
+            for ch in p.get('choices') or []:
+                try:
+                    mid = _safe_str(ch.get('main_id'))
+                    sid = _safe_str(ch.get('sub_id'))
+                    ml = _safe_str(ch.get('main_label'))
+                    sl = _safe_str(ch.get('sub_label'))
+                    cats.append(f"{mid}|{sid}|{ml}|{sl}")
+                except Exception:
+                    continue
+            rows_for_merge.append({'post_id': pid, 'llm_summary': summary, 'llm_categories': "; ".join(cats)})
+        df_llm = pd.DataFrame(rows_for_merge)
+        df_in = pd.read_excel(xlsx)
+        if 'post_id' not in df_in.columns:
+            if 'id' in df_in.columns:
+                df_in['post_id'] = df_in['id']
+            else:
+                df_in['post_id'] = pd.RangeIndex(start=1, stop=len(df_in) + 1, step=1)
+        try:
+            df_in['post_id'] = df_in['post_id'].astype(str)
+        except Exception:
+            df_in['post_id'] = df_in['post_id'].map(lambda x: str(x))
+        df_out = df_in.merge(df_llm, on='post_id', how='left')
+        excel_out = run_dir / f"labeled_{xlsx.name}"
+        with pd.ExcelWriter(excel_out, engine='openpyxl') as writer:
+            df_out.to_excel(writer, index=False, sheet_name='labeled')
+        logger.info(f"Zapisano Excela z etykietami: {excel_out}")
+        result = {
+            'run_dir': str(run_dir.resolve()),
+            'taxonomy_path': str(taxonomy_path.resolve()),
+            'combined_path': str(combined_path.resolve()),
+            'excel_out_path': str(excel_out.resolve()),
+            'total_posts': len(records),
+            'batches': len(inputs),
+        }
+        (run_dir / 'state.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+        logger.info("llm-batch (lokalnie): ZAKOŃCZONE")
+        logger.info(json.dumps(result, ensure_ascii=False))
+        return result
+
+    if use_batch_api and int(concurrency) > 1:
+        chunks: List[List[Dict[str, Any]]] = list(_chunk_iter(records, batch_size))
+        total = len(chunks)
+        logger.info(f"Planowane batchy: {total} | concurrency={concurrency}")
+
+        # Wznowienie: ustal istniejące inputy/wyniki i kolejkę do przerobienia
+        existing_inputs: set[int] = set()
+        existing_results: set[int] = set()
+        if resume_dir:
+            for f in run_dir.glob('batch_*_input.jsonl'):
+                try:
+                    existing_inputs.add(int(f.stem.split('_')[1]))
+                except Exception:
+                    pass
+            for f in run_dir.glob('batch_*_results.json'):
+                try:
+                    existing_results.add(int(f.stem.split('_')[1]))
+                except Exception:
+                    pass
+        # Do przerobienia najpierw brakujące wyniki z istniejących inputów, potem nowe indeksy
+        pending_queue: List[int] = sorted(list(existing_inputs - existing_results)) if resume_dir else []
+
+        next_idx = (max(existing_inputs) + 1) if (resume_dir and existing_inputs) else 0
+        active: List[Dict[str, Any]] = []  # {index, batch_id, state_path}
+
+        def _start_job(idx: int) -> Optional[Dict[str, Any]]:
+            chunk = chunks[idx]
+            in_path = run_dir / f"batch_{idx:04d}_input.jsonl"
+            # Jeśli wznawiamy i istnieje input – nie nadpisuj, użyj istniejącego
+            if not (resume_dir and in_path.exists()):
+                lines = _build_batch_jsonl_lines(chunk, taxonomy, BatchRunParams(
+                    excel_path=xlsx,
+                    output_dir=run_dir,
+                    batch_size=batch_size,
+                    poll_interval_s=poll_interval_s,
+                ))
+                in_path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+                logger.info(f"[Batch {idx}] Przygotowano input JSONL: {in_path} (requests={len(lines)})")
+            else:
+                try:
+                    # Podaj przydatną informację przy wznowieniu
+                    existing_lines = sum(1 for _ in in_path.open('r', encoding='utf-8'))
+                except Exception:
+                    existing_lines = 0
+                logger.info(f"[Batch {idx}] Używam istniejącego input JSONL: {in_path} (requests={existing_lines})")
+            uploaded = _upload_batch_input(client, in_path)
+            input_file_id = getattr(uploaded, 'id', None)
+            logger.info(f"[Batch {idx}] Upload OK, file_id={input_file_id}")
+            job = _create_batch_job(client, input_file_id)
+            batch_id = getattr(job, 'id', None)
+            logger.info(f"[Batch {idx}] Utworzono job, batch_id={batch_id}")
+            state_path = run_dir / f"batch_{idx:04d}_state.json"
+            return {"index": idx, "batch_id": batch_id, "state_path": state_path}
+
+        # Główna pętla: utrzymuj stałą liczbę aktywnych jobów
+        while active or pending_queue or next_idx < total:
+            # Uzupełnij do limitu współbieżności
+            while len(active) < max(1, int(concurrency)) and (pending_queue or next_idx < total):
+                if pending_queue:
+                    idx_to_start = pending_queue.pop(0)
+                else:
+                    idx_to_start = next_idx
+                    next_idx += 1
+                started = _start_job(idx_to_start)
+                if started is not None:
+                    active.append(started)
+
+            # Odpytaj wszystkie aktywne, zbierz zakończone
+            completed: List[Dict[str, Any]] = []
+            still_active: List[Dict[str, Any]] = []
+            for jobinfo in active:
+                idx = int(jobinfo["index"])  # type: ignore[index]
+                batch_id = str(jobinfo["batch_id"])  # type: ignore[index]
+                state_path = jobinfo["state_path"]  # type: ignore[index]
+                batch = client.batches.retrieve(batch_id)
+                status = getattr(batch, 'status', None)
+                if status in ("completed", "failed", "cancelled", "expired"):
+                    completed.append({"idx": idx, "final": batch, "state_path": state_path})
+                else:
+                    still_active.append(jobinfo)
+            active = still_active
+
+            # Przetwórz zakończone i natychmiast uzupełnij pulę
+            any_completed = False
+            for comp in completed:
+                any_completed = True
+                idx = int(comp["idx"])  # type: ignore[index]
+                final = comp["final"]
+                output_file_id = getattr(final, 'output_file_id', None)
+                error_file_id = getattr(final, 'error_file_id', None)
+                batch_results: List[Dict[str, Any]] = []
+                if output_file_id:
+                    txt = _retrieve_file_text(client, output_file_id)
+                    out_lines = [l for l in txt.splitlines() if l.strip()]
+                    logger.info(f"[Batch {idx}] Odebrano output (lines={len(out_lines)})")
+                    for l in out_lines:
+                        try:
+                            obj = json.loads(l)
+                        except Exception:
+                            continue
+                        custom_id = obj.get('custom_id')
+                        body = (((obj.get('response') or {}).get('body') or {}))
+                        content = ''
+                        try:
+                            choices = (body.get('choices') or [])
+                            if choices and choices[0].get('message'):
+                                content = _safe_str(choices[0]['message'].get('content'))
+                        except Exception:
+                            content = ''
+                        parsed = _parse_json_safe(content) if content else None
+                        batch_results.append({
+                            'custom_id': custom_id,
+                            'raw': body,
+                            'parsed': parsed,
+                        })
+                if error_file_id:
+                    try:
+                        err_txt = _retrieve_file_text(client, error_file_id)
+                        (run_dir / f"batch_{idx:04d}_errors.jsonl").write_text(err_txt, encoding='utf-8')
+                        logger.warning(f"[Batch {idx}] Zapisano errors.jsonl (możliwe błędy części żądań)")
+                    except Exception:
+                        pass
+                out_path = run_dir / f"batch_{idx:04d}_results.json"
+                _write_json(out_path, batch_results)
+                logger.info(f"[Batch {idx}] Zapisano wyniki: {out_path} (records={len(batch_results)})")
+
+                proposals: List[Dict[str, str]] = []
+                for item in batch_results:
+                    p = item.get('parsed')
+                    if isinstance(p, dict) and isinstance(p.get('new_subcategories'), list):
+                        for pr in p['new_subcategories']:
+                            pr_parent = _safe_str(pr.get('parent_id'))
+                            pr_name = _safe_str(pr.get('name'))
+                            if pr_parent and pr_name:
+                                proposals.append({'parent_id': pr_parent, 'name': pr_name})
+                added = _add_new_subcategories(taxonomy, proposals)
+                if added:
+                    _write_json(run_dir / f"batch_{idx:04d}_new_subcategories.json", added)
+                    _write_json(taxonomy_path, taxonomy)
+                    logger.info(f"[Batch {idx}] Dodano podkategorie: {len(added)}; taksonomia zaktualizowana")
+                else:
+                    logger.info(f"[Batch {idx}] Brak nowych podkategorii")
+                for item in batch_results:
+                    p = item.get('parsed')
+                    if isinstance(p, dict):
+                        all_outputs.append(p)
+
+                # Uzupełnij pulę po każdej zakończonej partii
+                if pending_queue or next_idx < total:
+                    if pending_queue:
+                        idx_to_start = pending_queue.pop(0)
+                    else:
+                        idx_to_start = next_idx
+                        next_idx += 1
+                    started = _start_job(idx_to_start)
+                    if started is not None:
+                        active.append(started)
+
+            if not any_completed:
+                time.sleep(max(1, poll_interval_s))
+
+        # Po trybie współbieżnym przejdź do sekcji zapisu łącznego wyniku
+        combined_path = run_dir / "combined_results.json"
+        _write_json(combined_path, all_outputs)
+        logger.info(f"Zapisano łączny wynik: {combined_path} (records={len(all_outputs)})")
+
+        # Merge do Excela
+        rows_for_merge: List[Dict[str, Any]] = []
+        for p in all_outputs:
+            if not isinstance(p, dict):
+                continue
+            pid = _safe_str(p.get('post_id'))
+            summary = _safe_str(p.get('summary'))
+            cats = []
+            for ch in p.get('choices') or []:
+                try:
+                    mid = _safe_str(ch.get('main_id'))
+                    sid = _safe_str(ch.get('sub_id'))
+                    ml = _safe_str(ch.get('main_label'))
+                    sl = _safe_str(ch.get('sub_label'))
+                    cats.append(f"{mid}|{sid}|{ml}|{sl}")
+                except Exception:
+                    continue
+            rows_for_merge.append({
+                'post_id': pid,
+                'llm_summary': summary,
+                'llm_categories': "; ".join(cats),
+            })
+        df_llm = pd.DataFrame(rows_for_merge)
+        df_in = pd.read_excel(xlsx)
+        if 'post_id' not in df_in.columns:
+            if 'id' in df_in.columns:
+                df_in['post_id'] = df_in['id']
+            else:
+                df_in['post_id'] = pd.RangeIndex(start=1, stop=len(df_in) + 1, step=1)
+        try:
+            df_in['post_id'] = df_in['post_id'].astype(str)
+        except Exception:
+            df_in['post_id'] = df_in['post_id'].map(lambda x: str(x))
+        df_out = df_in.merge(df_llm, on='post_id', how='left')
+        excel_out = run_dir / f"labeled_{xlsx.name}"
+        with pd.ExcelWriter(excel_out, engine='openpyxl') as writer:
+            df_out.to_excel(writer, index=False, sheet_name='labeled')
+        logger.info(f"Zapisano Excela z etykietami: {excel_out}")
+
+        # Podsumowanie i return
+        result = {
+            'run_dir': str(run_dir.resolve()),
+            'taxonomy_path': str(taxonomy_path.resolve()),
+            'combined_path': str(combined_path.resolve()),
+            'excel_out_path': str(excel_out.resolve()),
+            'total_posts': len(records),
+            'batches': len(chunks),
+        }
+        (run_dir / 'state.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+        logger.info("llm-batch: ZAKOŃCZONE")
+        logger.info(json.dumps(result, ensure_ascii=False))
+        return result
+
+    start_index = 0
+    if resume_dir:
+        # Ustal kolejny nieprzetworzony indeks
+        existing = sorted(run_dir.glob('batch_*_input.jsonl'))
+        if existing:
+            try:
+                last = max(int(f.stem.split('_')[1]) for f in existing)
+                start_index = last + 1
+            except Exception:
+                start_index = 0
+        # Dodatkowo omijaj wszystkie batch_*_results.json
+        processed_indices = processed_indices if 'processed_indices' in locals() else set()
 
     for batch_index, chunk in enumerate(_chunk_iter(records, batch_size)):
+        if resume_dir and batch_index < start_index:
+            continue
         batch_results: List[Dict[str, Any]] = []
         if use_batch_api:
             # === Tryb OpenAI Batch API ===
@@ -688,21 +1122,25 @@ def run_batch_classification(
             ))
             in_path = run_dir / f"batch_{batch_index:04d}_input.jsonl"
             in_path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+            logger.info(f"[Batch {batch_index}] Przygotowano input JSONL: {in_path} (requests={len(lines)})")
 
             uploaded = _upload_batch_input(client, in_path)
-            input_file_id = getattr(uploaded, 'id', None) or uploaded.get('id')
+            input_file_id = getattr(uploaded, 'id', None)
+            logger.info(f"[Batch {batch_index}] Upload OK, file_id={input_file_id}")
             job = _create_batch_job(client, input_file_id)
-            batch_id = getattr(job, 'id', None) or job.get('id')
+            batch_id = getattr(job, 'id', None)
+            logger.info(f"[Batch {batch_index}] Utworzono job, batch_id={batch_id}")
 
             state_path = run_dir / f"batch_{batch_index:04d}_state.json"
-            final = _poll_until_complete(client, batch_id, poll_interval_s, state_path)
+            final = _poll_until_complete(client, batch_id, poll_interval_s, state_path, logger)
 
-            output_file_id = getattr(final, 'output_file_id', None) or final.get('output_file_id')
-            error_file_id = getattr(final, 'error_file_id', None) or final.get('error_file_id')
+            output_file_id = getattr(final, 'output_file_id', None)
+            error_file_id = getattr(final, 'error_file_id', None)
 
             if output_file_id:
                 txt = _retrieve_file_text(client, output_file_id)
                 out_lines = [l for l in txt.splitlines() if l.strip()]
+                logger.info(f"[Batch {batch_index}] Odebrano output (lines={len(out_lines)})")
                 for l in out_lines:
                     try:
                         obj = json.loads(l)
@@ -727,6 +1165,7 @@ def run_batch_classification(
                 try:
                     err_txt = _retrieve_file_text(client, error_file_id)
                     (run_dir / f"batch_{batch_index:04d}_errors.jsonl").write_text(err_txt, encoding='utf-8')
+                    logger.warning(f"[Batch {batch_index}] Zapisano errors.jsonl (możliwe błędy części żądań)")
                 except Exception:
                     pass
         else:
@@ -737,6 +1176,7 @@ def run_batch_classification(
                 batch_size=batch_size,
                 poll_interval_s=poll_interval_s,
             )
+            logger.info(f"[Batch {batch_index}] Rozpoczynam bezpośrednie wywołania ({len(chunk)} postów)")
             for r in chunk:
                 pid = _safe_str(r.get('post_id'))
                 content = _safe_str(r.get('content'))
@@ -765,6 +1205,7 @@ def run_batch_classification(
         # Zapisz wyniki batcha
         out_path = run_dir / f"batch_{batch_index:04d}_results.json"
         _write_json(out_path, batch_results)
+        logger.info(f"[Batch {batch_index}] Zapisano wyniki: {out_path} (records={len(batch_results)})")
 
         # Uaktualnij taksonomię jeśli są propozycje
         proposals: List[Dict[str, str]] = []
@@ -780,6 +1221,9 @@ def run_batch_classification(
         if added:
             _write_json(run_dir / f"batch_{batch_index:04d}_new_subcategories.json", added)
             _write_json(taxonomy_path, taxonomy)
+            logger.info(f"[Batch {batch_index}] Dodano podkategorie: {len(added)}; taksonomia zaktualizowana")
+        else:
+            logger.info(f"[Batch {batch_index}] Brak nowych podkategorii")
 
         # Agreguj do całości
         for item in batch_results:
@@ -790,6 +1234,7 @@ def run_batch_classification(
     # Zapisz całość
     combined_path = run_dir / "combined_results.json"
     _write_json(combined_path, all_outputs)
+    logger.info(f"Zapisano łączny wynik: {combined_path} (records={len(all_outputs)})")
 
     # Merge do Excela
     # Normalizuj choices do kolumn: categories (CSV), summary
@@ -829,6 +1274,7 @@ def run_batch_classification(
     excel_out = run_dir / f"labeled_{xlsx.name}"
     with pd.ExcelWriter(excel_out, engine='openpyxl') as writer:
         df_out.to_excel(writer, index=False, sheet_name='labeled')
+    logger.info(f"Zapisano Excela z etykietami: {excel_out}")
 
     # Podsumowanie
     result = {
@@ -840,6 +1286,8 @@ def run_batch_classification(
         'batches': (len(records) + batch_size - 1) // batch_size,
     }
     (run_dir / 'state.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    logger.info("llm-batch: ZAKOŃCZONE")
+    logger.info(json.dumps(result, ensure_ascii=False))
     return result
 
 

@@ -19,6 +19,7 @@ import shutil
 from typing import List, Dict, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore')
+import random
 
 # Top2Vec i biblioteki do analizy
 from top2vec import Top2Vec
@@ -74,7 +75,8 @@ class TopicModelingAnalyzer:
     def _get_run_components(self, forums: List[str] | str, gender: str) -> Dict[str, Path | str]:
         when = self.current_run_time or datetime.now()
         date_str = when.strftime('%Y%m%d')
-        time_str = when.strftime('%H%M%S')
+        # Zwiększona rozdzielczość czasu, aby uniknąć kolizji przy wielu uruchomieniach w tej samej sekundzie
+        time_str = when.strftime('%H%M%S_%f')
         gender_dir = 'KM' if str(gender).upper() == 'KM' else str(gender)
         if isinstance(forums, str):
             forum_names = [forums]
@@ -88,6 +90,7 @@ class TopicModelingAnalyzer:
         results_dir = base / "results" / date_str / gender_dir / forums_code / time_str
         models_dir = base / "models" / date_str / gender_dir / forums_code / time_str
         logs_dir = base / "logs" / date_str / gender_dir / forums_code / time_str
+        run_dir = base / "runs" / date_str / gender_dir / forums_code / time_str
         return {
             'date_str': date_str,
             'time_str': time_str,
@@ -96,7 +99,72 @@ class TopicModelingAnalyzer:
             'results_dir': results_dir,
             'models_dir': models_dir,
             'logs_dir': logs_dir,
+            'run_dir': run_dir,
         }
+
+    def _ensure_symlink(self, target: Path, link_path: Path) -> None:
+        """Tworzy lub aktualizuje symlink link_path -> target (bez błędu, gdy się nie powiedzie)."""
+        try:
+            link_path.parent.mkdir(parents=True, exist_ok=True)
+            if link_path.exists() or link_path.is_symlink():
+                try:
+                    link_path.unlink()
+                except Exception:
+                    pass
+            link_path.symlink_to(target, target_is_directory=target.is_dir())
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Nie udało się utworzyć symlinku {link_path} -> {target}: {e}")
+
+    def _update_run_hub(self, comps: Dict[str, Path | str], analysis_results: Optional[Dict] = None) -> None:
+        """Aktualizuje zunifikowany katalog uruchomienia w data/topics/runs/... wraz z metadanymi i symlinkami."""
+        try:
+            run_dir = Path(comps['run_dir'])  # type: ignore[index]
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            # Zapisz metadane uruchomienia
+            meta = {
+                'run_slug': self.run_slug,
+                'date': comps['date_str'],
+                'time': comps['time_str'],
+                'gender': comps['gender_dir'],
+                'forums_code': comps['forums_code'],
+                'models_dir': str(comps['models_dir']),
+                'results_dir': str(comps['results_dir']),
+                'logs_dir': str(comps['logs_dir']),
+                'database_path': str(self.db_path),
+                'embedding_model': str(self.embedding_model),
+                'keep_documents_in_model': bool(self.keep_documents_in_model),
+                'target_num_topics': int(self.target_num_topics) if isinstance(self.target_num_topics, int) else None,
+            }
+            if analysis_results is not None:
+                # Nie upychamy całego JSON-u, tylko najważniejsze klucze
+                meta['analysis'] = {
+                    'forum_name': analysis_results.get('forum_name'),
+                    'gender': analysis_results.get('gender'),
+                    'num_topics': analysis_results.get('num_topics'),
+                    'total_documents': analysis_results.get('total_documents'),
+                    'timestamp': analysis_results.get('timestamp'),
+                }
+            try:
+                with open(run_dir / 'run.json', 'w', encoding='utf-8') as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=2, default=str)
+            except Exception:
+                pass
+
+            # Symlinki do artefaktów
+            self._ensure_symlink(Path(comps['results_dir']), run_dir / 'results')  # type: ignore[arg-type]
+            self._ensure_symlink(Path(comps['logs_dir']), run_dir / 'logs')        # type: ignore[arg-type]
+            model_target = Path(comps['models_dir']) / 'model'                     # type: ignore[arg-type]
+            if model_target.exists():
+                self._ensure_symlink(model_target, run_dir / 'model')
+
+            # Aktualizuj wskaźnik latest
+            latest_dir = self.output_dir / 'runs' / 'latest' / str(comps['gender_dir']) / str(comps['forums_code'])
+            self._ensure_symlink(run_dir, latest_dir)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Nie udało się zaktualizować katalogu run: {e}")
 
     def _reduce_to_target_topics(self, model: Top2Vec) -> Top2Vec:
         """Próbuje zredukować liczbę tematów różnymi wariantami API Top2Vec.
@@ -524,6 +592,13 @@ class TopicModelingAnalyzer:
         self.logger.info(f"Trenowanie modelu Top2Vec dla {forum_name} - {gender}")
         
         try:
+            # Ustaw seedy dla powtarzalności i/lub kontrolowanej wariancji między powtórzeniami
+            try:
+                random.seed(int(self.random_seed))
+                np.random.seed(int(self.random_seed))
+                os.environ["PYTHONHASHSEED"] = str(int(self.random_seed))
+            except Exception:
+                pass
             # Trenowanie modelu
             model = Top2Vec(
                 documents=documents,
@@ -554,6 +629,8 @@ class TopicModelingAnalyzer:
             model_path.parent.mkdir(parents=True, exist_ok=True)
             model.save(str(model_path))
             self.logger.info(f"Model zapisany w: {model_path}")
+            # Zaktualizuj zunifikowany katalog uruchomienia
+            self._update_run_hub(comps)
         except Exception as e:
             self.logger.error(f"Błąd podczas zapisywania modelu: {e}")
             raise
@@ -906,6 +983,8 @@ class TopicModelingAnalyzer:
                     shutil.copy2(cfg_path, results_dir / "pipeline.config.json")
             except Exception as e:
                 self.logger.warning(f"Nie udało się skopiować pipeline.config.json: {e}")
+            # Zaktualizuj zunifikowany katalog uruchomienia z metadanymi analizy
+            self._update_run_hub(comps, analysis_results=analysis_results)
             
         except Exception as e:
             self.logger.error(f"Błąd podczas zapisywania wyników: {e}")
